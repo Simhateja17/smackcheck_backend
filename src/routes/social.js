@@ -7,6 +7,53 @@ import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
+async function commentsCountByRatingId(ratingIds) {
+  if (!ratingIds.length) return new Map();
+
+  const { data, error } = await supabaseAdmin
+    .from('comments')
+    .select('rating_id')
+    .in('rating_id', ratingIds);
+  if (error) throw error;
+
+  return (data ?? []).reduce((counts, row) => {
+    counts.set(row.rating_id, (counts.get(row.rating_id) ?? 0) + 1);
+    return counts;
+  }, new Map());
+}
+
+function normalizeRatingRow(row, commentCounts = new Map()) {
+  const imageUrls = Array.isArray(row.image_urls)
+    ? row.image_urls.filter(Boolean)
+    : [];
+  const dishImageUrl = row.image_url ?? row.dishes?.image_url ?? imageUrls[0] ?? null;
+
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    user_name: row.profiles?.name || row.profiles?.username || 'Unknown',
+    user_profile_url: row.profiles?.profile_photo_url ?? null,
+    dish_id: row.dish_id,
+    dish_name: row.dishes?.name || 'Unknown dish',
+    dish_image_url: dishImageUrl,
+    restaurant_name: row.restaurants?.name || 'Unknown restaurant',
+    restaurant_city: row.restaurants?.city || '',
+    rating: row.rating ?? 0,
+    likes_count: row.likes_count ?? 0,
+    comments_count: commentCounts.get(row.id) ?? 0,
+    is_liked: false,
+    comment: row.comment ?? '',
+    image_urls: imageUrls.length ? imageUrls : (dishImageUrl ? [dishImageUrl] : []),
+    price: row.price ?? null,
+    created_at: row.created_at ?? null,
+  };
+}
+
+async function normalizeRatingRows(rows) {
+  const commentCounts = await commentsCountByRatingId((rows ?? []).map(row => row.id).filter(Boolean));
+  return (rows ?? []).map(row => normalizeRatingRow(row, commentCounts));
+}
+
 // GET /api/social/discover — all users for discovery
 router.get('/discover', requireAuth, async (req, res, next) => {
   try {
@@ -60,7 +107,7 @@ router.get('/find-by-username', requireAuth, async (req, res, next) => {
       .ilike('username', normalized)
       .maybeSingle();
     if (error) throw error;
-    res.json({ user_id: data?.id ?? null });
+    res.json({ user_id: data?.id ?? null, id: data?.id ?? null });
   } catch (err) { next(err); }
 });
 
@@ -77,12 +124,12 @@ router.get('/feed/following', requireAuth, async (req, res, next) => {
 
     const { data, error } = await supabaseAdmin
       .from('ratings')
-      .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name), restaurants(id, name, city)')
+      .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name, image_url), restaurants(id, name, city)')
       .in('user_id', ids)
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
     if (error) throw error;
-    res.json(data);
+    res.json(await normalizeRatingRows(data));
   } catch (err) { next(err); }
 });
 
@@ -144,18 +191,40 @@ router.get('/profile/:userId', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/social/ratings-by-ids?ids=a,b,c — bookmarked/saved rating cards
+router.get('/ratings-by-ids', requireAuth, async (req, res, next) => {
+  try {
+    const ids = String(req.query.ids ?? '')
+      .split(',')
+      .map(id => id.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+
+    if (!ids.length) return res.json([]);
+
+    const { data, error } = await supabaseAdmin
+      .from('ratings')
+      .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name, image_url), restaurants(id, name, city)')
+      .in('id', ids)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    res.json(await normalizeRatingRows(data));
+  } catch (err) { next(err); }
+});
+
 // GET /api/social/ratings/:userId?limit=20&offset=0 — ratings by a user
 router.get('/ratings/:userId', requireAuth, async (req, res, next) => {
   try {
     const { limit = '20', offset = '0' } = req.query;
     const { data, error } = await supabaseAdmin
       .from('ratings')
-      .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name), restaurants(id, name, city)')
+      .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name, image_url), restaurants(id, name, city)')
       .eq('user_id', req.params.userId)
       .order('created_at', { ascending: false })
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
     if (error) throw error;
-    res.json(data);
+    res.json(await normalizeRatingRows(data));
   } catch (err) { next(err); }
 });
 
