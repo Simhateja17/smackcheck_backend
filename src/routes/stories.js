@@ -13,6 +13,9 @@ function toStoryResponse(story) {
     id: story.id,
     user_id: story.user_id,
     image_url: story.image_url,
+    dish_name: story.dish_name ?? null,
+    rating: story.rating ?? null,
+    city: story.city ?? null,
     created_at: story.created_at,
     expires_at: story.expires_at,
     user_name: profile.name ?? profile.username ?? null,
@@ -60,13 +63,24 @@ router.get('/by-user', requireAuth, async (req, res, next) => {
 // POST /api/stories — upload a story
 router.post('/', requireAuth, async (req, res, next) => {
   try {
-    const { image_url } = req.body;
+    const { image_url, dish_name, rating, city } = req.body;
     if (!image_url) return res.status(400).json({ error: 'image_url required' });
+    const parsedRating = rating == null ? null : parseFloat(rating);
+    if (parsedRating != null && (Number.isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5)) {
+      return res.status(400).json({ error: 'rating must be between 1 and 5' });
+    }
     const now = new Date();
     const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabaseAdmin
       .from('stories')
-      .insert({ user_id: req.userId, image_url, expires_at: expiresAt })
+      .insert({
+        user_id: req.userId,
+        image_url,
+        dish_name: dish_name?.toString().slice(0, 120) ?? null,
+        rating: parsedRating,
+        city: city?.toString().slice(0, 80) ?? null,
+        expires_at: expiresAt,
+      })
       .select()
       .single();
     if (error) throw error;

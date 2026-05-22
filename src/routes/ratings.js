@@ -8,6 +8,19 @@ import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
+const RECEIPT_SOURCES = new Set(['camera', 'gallery', 'screenshot']);
+
+function isOwnReceiptStorageUrl(url, userId) {
+  try {
+    const parsed = new URL(url);
+    const safeUserId = encodeURIComponent(userId);
+    return parsed.pathname.includes(`/storage/v1/object/public/receipt-images/${safeUserId}/`) ||
+      parsed.pathname.includes(`/storage/v1/object/sign/receipt-images/${safeUserId}/`);
+  } catch {
+    return false;
+  }
+}
+
 // GET /api/ratings?dishId=...&restaurantId=...
 router.get('/', requireAuth, async (req, res, next) => {
   try {
@@ -127,6 +140,56 @@ router.get('/:id', requireAuth, async (req, res, next) => {
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Rating not found' });
     res.json(data);
+  } catch (err) { next(err); }
+});
+
+// POST /api/ratings/receipt — attach a receipt image for internal validation
+router.post('/receipt', requireAuth, async (req, res, next) => {
+  try {
+    const { rating_id, receipt_image_url, source = 'gallery' } = req.body;
+    if (!rating_id || !receipt_image_url) {
+      return res.status(400).json({ error: 'rating_id and receipt_image_url are required' });
+    }
+    if (!RECEIPT_SOURCES.has(source)) {
+      return res.status(400).json({ error: 'source must be camera, gallery, or screenshot' });
+    }
+    if (!isOwnReceiptStorageUrl(receipt_image_url, req.userId)) {
+      return res.status(400).json({ error: 'receipt image must be uploaded to your receipt storage folder' });
+    }
+
+    const { data: rating, error: ratingError } = await supabaseAdmin
+      .from('ratings')
+      .select('id, user_id, restaurant_id, dish_id, price, created_at')
+      .eq('id', rating_id)
+      .eq('user_id', req.userId)
+      .maybeSingle();
+    if (ratingError) throw ratingError;
+    if (!rating) return res.status(404).json({ error: 'Rating not found' });
+
+    const extractedData = {
+      source,
+      extraction_status: 'pending',
+      submitted_at: new Date().toISOString(),
+      rating_price: rating.price ?? null,
+      restaurant_id: rating.restaurant_id,
+      dish_id: rating.dish_id,
+    };
+
+    const { data, error } = await supabaseAdmin
+      .from('rating_receipts')
+      .insert({
+        user_id: req.userId,
+        rating_id,
+        image_url: receipt_image_url,
+        source,
+        validation_status: 'pending',
+        extracted_data: extractedData,
+      })
+      .select('id, validation_status')
+      .single();
+    if (error) throw error;
+
+    res.status(201).json(data);
   } catch (err) { next(err); }
 });
 

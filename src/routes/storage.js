@@ -26,6 +26,7 @@ const BUCKETS = {
   profile: 'profile-images',
   restaurant: 'restaurant-images',
   story: 'story-images',
+  receipt: 'receipt-images',
 };
 
 /**
