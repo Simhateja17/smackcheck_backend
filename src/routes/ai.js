@@ -23,7 +23,7 @@ function geminiKey() {
 
 /**
  * POST /api/ai/detect-dish
- * Body (JSON): { imageBase64: string, mimeType?: string }
+ * Body (JSON): { imageBase64: string, mimeType?: string }//
  * Returns: { dishName, confidence, cuisineType, description, isFood }
  */
 router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) => {
