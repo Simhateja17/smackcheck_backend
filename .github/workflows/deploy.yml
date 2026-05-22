@@ -44,10 +44,23 @@ jobs:
           SSH_USER: ${{ secrets.GCP_VM_USER }}
         run: |
           set -euo pipefail
+          if [ -z "$SSH_HOST" ]; then
+            echo "::error::Missing GitHub secret GCP_VM_HOST"
+            exit 1
+          fi
+          if [ -z "$SSH_USER" ]; then
+            echo "::error::Missing GitHub secret GCP_VM_USER"
+            exit 1
+          fi
+          if [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "::error::Missing GitHub secret GCP_VM_SSH_KEY"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/gcp_vm
           chmod 600 ~/.ssh/gcp_vm
+          ssh-keygen -y -f ~/.ssh/gcp_vm >/dev/null
           ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
           cat > ~/.ssh/config <<EOF
           Host gcp-vm
@@ -57,6 +70,7 @@ jobs:
             IdentitiesOnly yes
             StrictHostKeyChecking yes
           EOF
+          ssh -o BatchMode=yes gcp-vm 'echo "SSH connection ok"'
 
       - name: Deploy exact commit
         env:
