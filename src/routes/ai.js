@@ -8,10 +8,11 @@ import { uploadLimiter } from '../middleware/rateLimiter.js';
 
 const router = Router();
 
-const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1alpha';
+const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1beta';
 const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_LOW';
+const GEMINI_RECEIPT_MEDIA_RESOLUTION = process.env.GEMINI_RECEIPT_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 
 function geminiKey() {
   const key = process.env.GEMINI_API_KEY;
@@ -262,13 +263,17 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
       : [];
     const imageBytes = Math.ceil(String(imageBase64).length * 3 / 4);
     const prompt = [
-      'Read this restaurant receipt and match line-item prices to the uploaded dish names.',
+      'You are reading a restaurant, cafe, theater, or food delivery receipt image.',
+      'First OCR every visible purchased food or drink line item with its price, then match line-item prices to the uploaded dish names.',
       'Return compact JSON only with this shape:',
       '{"summary":string|null,"rawItems":string[],"suggestions":[{"dishName":string,"price":number,"confidence":number}]}',
       'Use the exact dishName from this list when possible:',
       JSON.stringify(names),
-      'If there is no exact name match, match the closest receipt line for the same food category, for example any burger line can match an uploaded burger dish.',
-      'Only include numeric prices. Do not invent prices if the receipt does not show them.',
+      'rawItems must include visible purchasable line items such as "AVOCADO BURGER 14.99", "SM POPCORN 8.50", or "PESTO PASTA 12.00".',
+      'Ignore subtotal, tax, tip, service charge, discounts, balance, change, payment, card, approval, and total lines.',
+      'If there is no exact name match, match the closest food category: any burger line can match an uploaded burger dish, pasta can match pasta, biryani can match rice/biryani, fries can match fries.',
+      'If only one uploaded dish name is provided and exactly one plausible food line item price is visible, return that price for the dish with confidence 0.45 even if the names differ.',
+      'Only include numeric item prices. Do not invent prices if no item price is visible.',
     ].join('\n');
 
     const body = {
@@ -277,7 +282,7 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
           { text: prompt },
           {
             inline_data: { mime_type: mimeType, data: imageBase64 },
-            media_resolution: { level: GEMINI_MEDIA_RESOLUTION },
+            media_resolution: { level: GEMINI_RECEIPT_MEDIA_RESOLUTION },
           },
         ],
       }],
@@ -325,7 +330,7 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
     console.info('[AI_RECEIPT_TIMING]', {
       model: GEMINI_MODEL,
       apiVersion: GEMINI_API_VERSION,
-      mediaResolution: GEMINI_MEDIA_RESOLUTION,
+      mediaResolution: GEMINI_RECEIPT_MEDIA_RESOLUTION,
       imageBytes,
       dishCount: names.length,
       geminiMs: Date.now() - geminiStartedAt,
