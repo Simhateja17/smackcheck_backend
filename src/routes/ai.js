@@ -11,7 +11,7 @@ const router = Router();
 const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1beta';
 const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
-const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_LOW';
+const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 const GEMINI_RECEIPT_MEDIA_RESOLUTION = process.env.GEMINI_RECEIPT_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 
 function geminiKey() {
@@ -181,6 +181,8 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       'Return compact JSON only with this shape:',
       '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"description":string,"ingredients":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string}',
       'Use the most specific common dish name. For example, say "pesto pasta" instead of just "pasta" when visible.',
+      'If multiple dishes are visible, name the most prominent foreground dish.',
+      'Do not return Unknown if a recognizable food or drink is visible.',
     ].join('\n');
 
     const body = {

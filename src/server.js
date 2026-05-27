@@ -6,12 +6,16 @@ import morgan from 'morgan';
 
 import { globalLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { requestLogger } from './middleware/requestLogger.js';
 import router from './routes/index.js';
 
 const app = express();
 
 // ── Security headers ────────────────────────────────────────────────────────
 app.use(helmet());
+
+// ── Request logging ─────────────────────────────────────────────────────────
+app.use(requestLogger);
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? '').split(',').filter(Boolean);
