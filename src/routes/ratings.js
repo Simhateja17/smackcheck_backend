@@ -10,6 +10,68 @@ const router = Router();
 
 const RECEIPT_SOURCES = new Set(['camera', 'gallery', 'screenshot']);
 
+function parseRating(value) {
+  const rating = Number.parseFloat(value);
+  if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+    return null;
+  }
+  return rating;
+}
+
+function parseOptionalNumber(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function cleanTags(tags) {
+  return Array.isArray(tags)
+    ? tags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 20)
+    : [];
+}
+
+function cleanReceiptPayload(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') return value.slice(0, 12000);
+  return JSON.stringify(value).slice(0, 12000);
+}
+
+async function createOrGetDish({ name, restaurantId, imageUrl }) {
+  const normalizedName = String(name ?? '').trim();
+  if (!normalizedName || !restaurantId) {
+    throw Object.assign(new Error('dish name and restaurant_id are required'), { status: 400 });
+  }
+
+  const { data: existing, error: findError } = await supabaseAdmin
+    .from('dishes')
+    .select('*')
+    .eq('name', normalizedName)
+    .eq('restaurant_id', restaurantId)
+    .maybeSingle();
+  if (findError) throw findError;
+
+  if (existing) {
+    if (imageUrl && !existing.image_url) {
+      await supabaseAdmin.from('dishes').update({ image_url: imageUrl }).eq('id', existing.id);
+      existing.image_url = imageUrl;
+    }
+    return existing;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('dishes')
+    .insert({
+      id: uuidv4(),
+      name: normalizedName,
+      restaurant_id: restaurantId,
+      image_url: imageUrl ?? null,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 function isOwnReceiptStorageUrl(url, userId) {
   try {
     const parsed = new URL(url);
@@ -228,6 +290,141 @@ router.post('/', requireAuth, async (req, res, next) => {
     updateAverages(dish_id, restaurant_id).catch(console.error);
 
     res.status(201).json(data);
+  } catch (err) { next(err); }
+});
+
+// POST /api/ratings/grouped — submit one feed post with multiple dish images.
+// Body: {
+//   restaurant_id, rating, comment?, tags?, receipt_image_url?, receipt_extracted_data?,
+//   latitude?, longitude?,
+//   items: [{ dish_name, image_url, price?, ai_confidence? }]
+// }
+router.post('/grouped', requireAuth, async (req, res, next) => {
+  try {
+    const {
+      restaurant_id,
+      rating: rawRating,
+      comment = '',
+      tags = [],
+      receipt_image_url = null,
+      receipt_extracted_data = null,
+      latitude = null,
+      longitude = null,
+      items = [],
+    } = req.body;
+
+    const rating = parseRating(rawRating);
+    if (!restaurant_id || rating == null) {
+      return res.status(400).json({ error: 'restaurant_id and rating between 1 and 5 are required' });
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'items must include at least one dish' });
+    }
+    if (items.length > 10) {
+      return res.status(400).json({ error: 'maximum 10 dishes per grouped post' });
+    }
+
+    const normalizedItems = items.map((item, index) => ({
+      dish_name: String(item?.dish_name ?? item?.dishName ?? '').trim(),
+      image_url: item?.image_url ?? item?.imageUrl ?? null,
+      price: parseOptionalNumber(item?.price),
+      ai_confidence: parseOptionalNumber(item?.ai_confidence ?? item?.aiConfidence),
+      sort_order: Number.isInteger(item?.sort_order) ? item.sort_order : index,
+    }));
+
+    if (normalizedItems.some(item => !item.dish_name)) {
+      return res.status(400).json({ error: 'each grouped item needs dish_name' });
+    }
+
+    const createdAt = new Date().toISOString();
+    const groupId = uuidv4();
+
+    const { data: group, error: groupError } = await supabaseAdmin
+      .from('review_groups')
+      .insert({
+        id: groupId,
+        user_id: req.userId,
+        restaurant_id,
+        rating,
+        comment: String(comment ?? '').slice(0, 2000),
+        tags: cleanTags(tags),
+        receipt_image_url,
+        receipt_extracted_data: cleanReceiptPayload(receipt_extracted_data),
+        latitude: parseOptionalNumber(latitude),
+        longitude: parseOptionalNumber(longitude),
+        created_at: createdAt,
+      })
+      .select()
+      .single();
+    if (groupError) throw groupError;
+
+    const dishes = [];
+    for (const item of normalizedItems) {
+      dishes.push(await createOrGetDish({
+        name: item.dish_name,
+        restaurantId: restaurant_id,
+        imageUrl: item.image_url,
+      }));
+    }
+
+    const primaryItem = normalizedItems[0];
+    const primaryDish = dishes[0];
+    const ratingId = uuidv4();
+
+    const { data: primaryRating, error: ratingError } = await supabaseAdmin
+      .from('ratings')
+      .insert({
+        id: ratingId,
+        user_id: req.userId,
+        dish_id: primaryDish.id,
+        restaurant_id,
+        rating,
+        comment: String(comment ?? '').slice(0, 2000),
+        image_url: primaryItem.image_url,
+        latitude: parseOptionalNumber(latitude),
+        longitude: parseOptionalNumber(longitude),
+        price: primaryItem.price,
+        group_id: groupId,
+        created_at: createdAt,
+      })
+      .select()
+      .single();
+    if (ratingError) throw ratingError;
+
+    const { error: updateGroupError } = await supabaseAdmin
+      .from('review_groups')
+      .update({ primary_rating_id: ratingId })
+      .eq('id', groupId);
+    if (updateGroupError) throw updateGroupError;
+
+    const groupItems = normalizedItems.map((item, index) => ({
+      id: uuidv4(),
+      group_id: groupId,
+      rating_id: ratingId,
+      dish_id: dishes[index].id,
+      dish_name: item.dish_name,
+      image_url: item.image_url,
+      price: item.price,
+      sort_order: item.sort_order,
+      ai_confidence: item.ai_confidence,
+      created_at: createdAt,
+    }));
+
+    const { data: createdItems, error: itemsError } = await supabaseAdmin
+      .from('review_group_items')
+      .insert(groupItems)
+      .select();
+    if (itemsError) throw itemsError;
+
+    updateAverages(primaryDish.id, restaurant_id).catch(console.error);
+
+    res.status(201).json({
+      group,
+      rating: primaryRating,
+      items: createdItems ?? [],
+      group_id: groupId,
+      primary_rating_id: ratingId,
+    });
   } catch (err) { next(err); }
 });
 

@@ -10,7 +10,7 @@ const router = Router();
 
 const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1alpha';
 const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_LOW';
 
 function geminiKey() {
@@ -21,10 +21,152 @@ function geminiKey() {
   return key;
 }
 
+function parseGeminiJson(rawText, fallback) {
+  const cleaned = String(rawText ?? '{}')
+    .replace(/```json\n?/g, '')
+    .replace(/```\n?/g, '')
+    .trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeReceiptAnalysis(value) {
+  const sourceSuggestions = value?.suggestions ?? value?.matches;
+  const suggestions = Array.isArray(sourceSuggestions)
+    ? sourceSuggestions
+      .map((suggestion) => ({
+        dishName: String(suggestion?.dishName ?? suggestion?.dish_name ?? '').trim(),
+        price: Number.parseFloat(suggestion?.price),
+        confidence: Number.parseFloat(suggestion?.confidence ?? 0),
+      }))
+      .filter((suggestion) => suggestion.dishName && Number.isFinite(suggestion.price))
+    : [];
+
+  const sourceRawItems = value?.rawItems ?? value?.raw_items ?? value?.receiptItems ?? value?.receipt_items ?? value?.lineItems ?? value?.line_items;
+  const rawItems = Array.isArray(sourceRawItems)
+    ? sourceRawItems.map((item) => {
+      if (typeof item === 'string') return item;
+      const name = item?.name ?? item?.item ?? item?.dishName ?? item?.dish_name ?? '';
+      const price = item?.price ?? item?.amount ?? item?.total ?? '';
+      return [name, price].filter((part) => String(part).trim()).join(' ');
+    }).filter(Boolean).slice(0, 60)
+    : [];
+
+  return {
+    summary: typeof value?.summary === 'string' ? value.summary.slice(0, 500) : null,
+    rawItems,
+    receiptItems: rawItems,
+    suggestions,
+    matches: suggestions,
+  };
+}
+
+function normalizeReceiptToken(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token && !['dish', 'food', 'with', 'and', 'the', 'plate', 'item'].includes(token))
+    .join(' ');
+}
+
+function parsePriceFromReceiptLine(line) {
+  const matches = [...String(line).matchAll(/(?:[$₹]\s*)?(\d+(?:\.\d{1,2})?)/g)]
+    .map((match) => Number.parseFloat(match[1]))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (matches.length === 0) return null;
+  return matches[matches.length - 1];
+}
+
+function inferReceiptSuggestionsFromRawItems(rawItems, dishNames) {
+  const receiptLines = rawItems
+    .map((line) => ({ line, normalized: normalizeReceiptToken(line), price: parsePriceFromReceiptLine(line) }))
+    .filter((line) => line.normalized && line.price != null);
+  if (receiptLines.length === 0) return [];
+
+  const usedLineIndexes = new Set();
+  const suggestions = [];
+
+  for (const dishName of dishNames) {
+    const normalizedDish = normalizeReceiptToken(dishName);
+    if (!normalizedDish) continue;
+
+    let best = null;
+    receiptLines.forEach((line, index) => {
+      if (usedLineIndexes.has(index)) return;
+      const score = receiptMatchScore(normalizedDish, line.normalized);
+      if (score > 0 && (!best || score > best.score)) {
+        best = { index, line, score };
+      }
+    });
+
+    if (best && best.score >= 20) {
+      usedLineIndexes.add(best.index);
+      suggestions.push({
+        dishName,
+        price: best.line.price,
+        confidence: Math.min(1, best.score / 100),
+      });
+    }
+  }
+
+  if (suggestions.length === 0) {
+    rawItems.slice(0, dishNames.length).forEach((line, index) => {
+      const price = parsePriceFromReceiptLine(line);
+      if (price != null && dishNames[index]) {
+        suggestions.push({ dishName: dishNames[index], price, confidence: 0.35 });
+      }
+    });
+  }
+
+  return suggestions;
+}
+
+function receiptMatchScore(dishName, receiptLine) {
+  if (dishName === receiptLine) return 100;
+  if (dishName.includes(receiptLine) || receiptLine.includes(dishName)) return 80;
+
+  const dishTokens = new Set(dishName.split(' ').filter((token) => token.length >= 3));
+  const lineTokens = new Set(receiptLine.split(' ').filter((token) => token.length >= 3));
+  const overlap = [...dishTokens].filter((token) => lineTokens.has(token)).length;
+  return overlap * 25;
+}
+
+function normalizeDishDetection(value) {
+  const isFood = value?.isFood !== false;
+  const dishName = String(value?.dishName ?? value?.dish_name ?? '').trim();
+  const cuisine = String(value?.cuisine ?? value?.cuisineType ?? value?.cuisine_type ?? '').trim();
+  const itemType = String(value?.itemType ?? value?.item_type ?? (isFood ? 'food' : 'unknown')).trim().toLowerCase();
+  const confidence = Number.parseFloat(value?.confidence ?? 0);
+  const alternatives = Array.isArray(value?.alternatives)
+    ? value.alternatives.map((item) => String(item)).filter(Boolean).slice(0, 5)
+    : [];
+
+  return {
+    isFood,
+    dishName: dishName || 'Unknown',
+    cuisine,
+    cuisineType: cuisine,
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
+    alternatives,
+    description: typeof value?.description === 'string' ? value.description.slice(0, 500) : '',
+    ingredients: Array.isArray(value?.ingredients)
+      ? value.ingredients.map((item) => String(item)).filter(Boolean).slice(0, 20)
+      : [],
+    itemType: ['food', 'beverage'].includes(itemType) ? itemType : (isFood ? 'food' : 'unknown'),
+    restaurantChain: String(value?.restaurantChain ?? value?.restaurant_chain ?? '').trim(),
+    restaurantType: String(value?.restaurantType ?? value?.restaurant_type ?? '').trim(),
+    error: null,
+  };
+}
+
 /**
  * POST /api/ai/detect-dish
  * Body (JSON): { imageBase64: string, mimeType?: string }
- * Returns: { dishName, confidence, cuisineType, description, isFood }
+ * Returns the same shape as the old analyze-dish Edge Function.
  */
 router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) => {
   try {
@@ -33,7 +175,12 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
     const imageBytes = Math.ceil(String(imageBase64).length * 3 / 4);
 
-    const prompt = 'Identify the dish. Return compact JSON only: {"isFood":boolean,"dishName":string|null,"cuisineType":string|null,"confidence":number,"description":string|null}';
+    const prompt = [
+      'Identify the food or beverage in this image.',
+      'Return compact JSON only with this shape:',
+      '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"description":string,"ingredients":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string}',
+      'Use the most specific common dish name. For example, say "pesto pasta" instead of just "pasta" when visible.',
+    ].join('\n');
 
     const body = {
       contents: [{
@@ -77,13 +224,13 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     const rawText = geminiResp.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
 
     // Strip markdown code fences if Gemini wraps the response
-    const cleaned = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    let result;
-    try {
-      result = JSON.parse(cleaned);
-    } catch {
-      result = { isFood: false, dishName: null, cuisineType: null, confidence: 0, description: null };
-    }
+    const result = normalizeDishDetection(parseGeminiJson(rawText, {
+      isFood: false,
+      dishName: null,
+      cuisine: null,
+      confidence: 0,
+      description: null,
+    }));
 
     console.info('[AI_DETECT_TIMING]', {
       model: GEMINI_MODEL,
@@ -91,6 +238,97 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       mediaResolution: GEMINI_MEDIA_RESOLUTION,
       imageBytes,
       geminiMs,
+      totalMs: Date.now() - startedAt,
+      usage: geminiResp.usageMetadata,
+    });
+
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/ai/analyze-receipt
+ * Body (JSON): { imageBase64: string, mimeType?: string, dishNames?: string[] }
+ * Returns: { summary, rawItems, receiptItems, suggestions, matches }
+ */
+router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, next) => {
+  try {
+    const startedAt = Date.now();
+    const { imageBase64, mimeType = 'image/jpeg', dishNames = [] } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+
+    const names = Array.isArray(dishNames)
+      ? dishNames.map((name) => String(name).trim()).filter(Boolean).slice(0, 20)
+      : [];
+    const imageBytes = Math.ceil(String(imageBase64).length * 3 / 4);
+    const prompt = [
+      'Read this restaurant receipt and match line-item prices to the uploaded dish names.',
+      'Return compact JSON only with this shape:',
+      '{"summary":string|null,"rawItems":string[],"suggestions":[{"dishName":string,"price":number,"confidence":number}]}',
+      'Use the exact dishName from this list when possible:',
+      JSON.stringify(names),
+      'If there is no exact name match, match the closest receipt line for the same food category, for example any burger line can match an uploaded burger dish.',
+      'Only include numeric prices. Do not invent prices if the receipt does not show them.',
+    ].join('\n');
+
+    const body = {
+      contents: [{
+        parts: [
+          { text: prompt },
+          {
+            inline_data: { mime_type: mimeType, data: imageBase64 },
+            media_resolution: { level: GEMINI_MEDIA_RESOLUTION },
+          },
+        ],
+      }],
+      generationConfig: {
+        maxOutputTokens: 512,
+        responseMimeType: 'application/json',
+        thinkingConfig: {
+          thinkingLevel: 'minimal',
+        },
+      },
+    };
+
+    const geminiStartedAt = Date.now();
+    const resp = await fetch(
+      `${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': geminiKey(),
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    if (!resp.ok) {
+      const err = await resp.text();
+      throw Object.assign(new Error(`Gemini API error: ${err}`), { status: 502 });
+    }
+
+    const geminiResp = await resp.json();
+    const rawText = geminiResp.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    const parsedReceipt = normalizeReceiptAnalysis(parseGeminiJson(rawText, {}));
+    const inferredSuggestions = parsedReceipt.suggestions.length === 0
+      ? inferReceiptSuggestionsFromRawItems(parsedReceipt.rawItems, names)
+      : [];
+    const result = inferredSuggestions.length > 0
+      ? {
+        ...parsedReceipt,
+        suggestions: inferredSuggestions,
+        matches: inferredSuggestions,
+      }
+      : parsedReceipt;
+
+    console.info('[AI_RECEIPT_TIMING]', {
+      model: GEMINI_MODEL,
+      apiVersion: GEMINI_API_VERSION,
+      mediaResolution: GEMINI_MEDIA_RESOLUTION,
+      imageBytes,
+      dishCount: names.length,
+      geminiMs: Date.now() - geminiStartedAt,
       totalMs: Date.now() - startedAt,
       usage: geminiResp.usageMetadata,
     });
