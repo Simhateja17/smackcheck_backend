@@ -29,9 +29,24 @@ function parseGeminiJson(rawText, fallback) {
     .trim();
   try {
     return JSON.parse(cleaned);
-  } catch {
+  } catch (error) {
+    console.warn('[AI_DETECT_PARSE_ERROR]', {
+      message: error.message,
+      rawTextPreview: cleaned.slice(0, 500),
+    });
     return fallback;
   }
+}
+
+function summarizeGeminiResponse(geminiResp) {
+  const candidate = geminiResp?.candidates?.[0];
+  return {
+    candidateCount: Array.isArray(geminiResp?.candidates) ? geminiResp.candidates.length : 0,
+    finishReason: candidate?.finishReason,
+    safetyRatings: candidate?.safetyRatings,
+    promptFeedback: geminiResp?.promptFeedback,
+    usage: geminiResp?.usageMetadata,
+  };
 }
 
 function normalizeReceiptAnalysis(value) {
@@ -173,8 +188,28 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
   try {
     const startedAt = Date.now();
     const { imageBase64, mimeType = 'image/jpeg' } = req.body;
-    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+    if (!imageBase64) {
+      console.warn('[AI_DETECT_BAD_REQUEST]', {
+        requestId: req.requestId,
+        userId: req.userId,
+        reason: 'imageBase64 required',
+        bodyKeys: Object.keys(req.body ?? {}),
+      });
+      return res.status(400).json({ error: 'imageBase64 required' });
+    }
     const imageBytes = Math.ceil(String(imageBase64).length * 3 / 4);
+
+    console.info('[AI_DETECT_START]', {
+      requestId: req.requestId,
+      userId: req.userId,
+      model: GEMINI_MODEL,
+      apiVersion: GEMINI_API_VERSION,
+      mediaResolution: GEMINI_MEDIA_RESOLUTION,
+      mimeType,
+      base64Chars: String(imageBase64).length,
+      estimatedImageBytes: imageBytes,
+      jsonBodyLimit: process.env.JSON_BODY_LIMIT ?? '8mb',
+    });
 
     const prompt = [
       'Identify the food or beverage in this image.',
@@ -216,15 +251,40 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
         body: JSON.stringify(body),
       }
     );
+    const geminiMs = Date.now() - geminiStartedAt;
+
+    console.info('[AI_DETECT_GEMINI_HTTP]', {
+      requestId: req.requestId,
+      userId: req.userId,
+      status: resp.status,
+      ok: resp.ok,
+      statusText: resp.statusText,
+      geminiMs,
+      model: GEMINI_MODEL,
+    });
 
     if (!resp.ok) {
       const err = await resp.text();
+      console.error('[AI_DETECT_GEMINI_ERROR]', {
+        requestId: req.requestId,
+        userId: req.userId,
+        status: resp.status,
+        statusText: resp.statusText,
+        geminiMs,
+        errorPreview: err.slice(0, 1000),
+      });
       throw Object.assign(new Error(`Gemini API error: ${err}`), { status: 502 });
     }
 
     const geminiResp = await resp.json();
-    const geminiMs = Date.now() - geminiStartedAt;
     const rawText = geminiResp.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+
+    console.info('[AI_DETECT_GEMINI_RESPONSE]', {
+      requestId: req.requestId,
+      userId: req.userId,
+      ...summarizeGeminiResponse(geminiResp),
+      rawTextPreview: rawText.slice(0, 500),
+    });
 
     // Strip markdown code fences if Gemini wraps the response
     const result = normalizeDishDetection(parseGeminiJson(rawText, {
@@ -235,18 +295,36 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       description: null,
     }));
 
-    console.info('[AI_DETECT_TIMING]', {
+    console.info('[AI_DETECT_RESULT]', {
+      requestId: req.requestId,
+      userId: req.userId,
       model: GEMINI_MODEL,
       apiVersion: GEMINI_API_VERSION,
       mediaResolution: GEMINI_MEDIA_RESOLUTION,
       imageBytes,
       geminiMs,
       totalMs: Date.now() - startedAt,
-      usage: geminiResp.usageMetadata,
+      dishName: result.dishName,
+      cuisine: result.cuisine,
+      confidence: result.confidence,
+      itemType: result.itemType,
+      isFood: result.isFood,
+      alternatives: result.alternatives,
+      restaurantChain: result.restaurantChain,
+      restaurantType: result.restaurantType,
     });
 
     res.json(result);
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('[AI_DETECT_FAILURE]', {
+      requestId: req.requestId,
+      userId: req.userId,
+      message: err.message,
+      status: err.status,
+      stack: err.stack,
+    });
+    next(err);
+  }
 });
 
 /**
