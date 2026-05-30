@@ -113,7 +113,7 @@ router.get('/restaurant-photos', requireAuth, async (req, res, next) => {
       .eq('id', restaurantId)
       .maybeSingle();
 
-    const cachedUrls = (cached?.photo_urls?.length ? cached.photo_urls : (cached?.image_url ? [cached.image_url] : []))
+    const cachedUrls = (cached?.photo_urls?.length ? cached.photo_urls : [])
       .filter(url => !isLegacyGooglePhotoUrl(url));
     if (cachedUrls.length) return res.json({ photos: cachedUrls });
 
@@ -127,9 +127,12 @@ router.get('/restaurant-photos', requireAuth, async (req, res, next) => {
         .from('restaurants')
         .update({ photo_urls: photos })
         .eq('id', restaurantId);
+      return res.json({ photos });
     }
 
-    res.json({ photos });
+    const fallbackUrls = (cached?.image_url ? [cached.image_url] : [])
+      .filter(url => !isLegacyGooglePhotoUrl(url));
+    res.json({ photos: fallbackUrls });
   } catch (err) { next(err); }
 });
 

@@ -28,7 +28,7 @@ router.put('/profile', requireAuth, async (req, res, next) => {
   try {
     const allowed = ['name', 'username', 'bio', 'profile_photo_url', 'last_location',
       'latitude', 'longitude', 'location_sharing_enabled', 'push_token',
-      'profile_picture_uploaded'];
+      'profile_picture_uploaded', 'profile_setup_completed'];
     const updates = Object.fromEntries(
       Object.entries(req.body).filter(([k]) => allowed.includes(k))
     );
@@ -48,12 +48,13 @@ router.put('/profile', requireAuth, async (req, res, next) => {
 // POST /api/auth/profile — upsert (create or update on sign-up)
 router.post('/profile', requireAuth, async (req, res, next) => {
   try {
-    const { name, username, email } = req.body;
+    const { name, username, email, profile_setup_completed } = req.body;
     const profile = {
       id: req.userId,
       name: name ?? '',
       username: username ?? null,
       email: email ?? '',
+      profile_setup_completed: profile_setup_completed ?? false,
       xp: 0,
       level: 1,
       streak_count: 0,
