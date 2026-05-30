@@ -303,7 +303,7 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
   try {
     const {
       restaurant_id,
-      rating: rawRating,
+      rating: rawOverallRating,
       comment = '',
       tags = [],
       receipt_image_url = null,
@@ -313,9 +313,12 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       items = [],
     } = req.body;
 
-    const rating = parseRating(rawRating);
-    if (!restaurant_id || rating == null) {
-      return res.status(400).json({ error: 'restaurant_id and rating between 1 and 5 are required' });
+    const overallRating = rawOverallRating != null ? parseRating(rawOverallRating) : null;
+    if (overallRating === null && rawOverallRating != null) {
+      return res.status(400).json({ error: 'overall rating must be between 1 and 5 if provided' });
+    }
+    if (!restaurant_id) {
+      return res.status(400).json({ error: 'restaurant_id is required' });
     }
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'items must include at least one dish' });
@@ -324,20 +327,29 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'maximum 10 dishes per grouped post' });
     }
 
-    const normalizedItems = items.map((item, index) => ({
-      dish_name: String(item?.dish_name ?? item?.dishName ?? '').trim(),
-      image_url: item?.image_url ?? item?.imageUrl ?? null,
-      price: parseOptionalNumber(item?.price),
-      ai_confidence: parseOptionalNumber(item?.ai_confidence ?? item?.aiConfidence),
-      sort_order: Number.isInteger(item?.sort_order) ? item.sort_order : index,
-    }));
+    const normalizedItems = items.map((item, index) => {
+      const dishRating = parseRating(item?.rating);
+      return {
+        dish_name: String(item?.dish_name ?? item?.dishName ?? '').trim(),
+        image_url: item?.image_url ?? item?.imageUrl ?? null,
+        price: parseOptionalNumber(item?.price),
+        ai_confidence: parseOptionalNumber(item?.ai_confidence ?? item?.aiConfidence),
+        sort_order: Number.isInteger(item?.sort_order) ? item.sort_order : index,
+        rating: dishRating,
+      };
+    });
 
     if (normalizedItems.some(item => !item.dish_name)) {
       return res.status(400).json({ error: 'each grouped item needs dish_name' });
     }
+    if (normalizedItems.some(item => item.rating == null)) {
+      return res.status(400).json({ error: 'each dish needs a rating between 1 and 5' });
+    }
 
     const createdAt = new Date().toISOString();
     const groupId = uuidv4();
+
+    const groupRating = overallRating ?? (normalizedItems.reduce((s, i) => s + i.rating, 0) / normalizedItems.length);
 
     const { data: group, error: groupError } = await supabaseAdmin
       .from('review_groups')
@@ -345,7 +357,7 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
         id: groupId,
         user_id: req.userId,
         restaurant_id,
-        rating,
+        rating: groupRating,
         comment: String(comment ?? '').slice(0, 2000),
         tags: cleanTags(tags),
         receipt_image_url,
@@ -367,40 +379,38 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       }));
     }
 
-    const primaryItem = normalizedItems[0];
-    const primaryDish = dishes[0];
-    const ratingId = uuidv4();
+    const primaryRatingId = uuidv4();
+    const ratingRows = normalizedItems.map((item, index) => ({
+      id: index === 0 ? primaryRatingId : uuidv4(),
+      user_id: req.userId,
+      dish_id: dishes[index].id,
+      restaurant_id,
+      rating: item.rating,
+      comment: index === 0 ? String(comment ?? '').slice(0, 2000) : '',
+      image_url: item.image_url,
+      latitude: parseOptionalNumber(latitude),
+      longitude: parseOptionalNumber(longitude),
+      price: item.price,
+      group_id: groupId,
+      created_at: createdAt,
+    }));
 
-    const { data: primaryRating, error: ratingError } = await supabaseAdmin
+    const { data: createdRatings, error: ratingError } = await supabaseAdmin
       .from('ratings')
-      .insert({
-        id: ratingId,
-        user_id: req.userId,
-        dish_id: primaryDish.id,
-        restaurant_id,
-        rating,
-        comment: String(comment ?? '').slice(0, 2000),
-        image_url: primaryItem.image_url,
-        latitude: parseOptionalNumber(latitude),
-        longitude: parseOptionalNumber(longitude),
-        price: primaryItem.price,
-        group_id: groupId,
-        created_at: createdAt,
-      })
-      .select()
-      .single();
+      .insert(ratingRows)
+      .select();
     if (ratingError) throw ratingError;
 
     const { error: updateGroupError } = await supabaseAdmin
       .from('review_groups')
-      .update({ primary_rating_id: ratingId })
+      .update({ primary_rating_id: primaryRatingId })
       .eq('id', groupId);
     if (updateGroupError) throw updateGroupError;
 
     const groupItems = normalizedItems.map((item, index) => ({
       id: uuidv4(),
       group_id: groupId,
-      rating_id: ratingId,
+      rating_id: ratingRows[index].id,
       dish_id: dishes[index].id,
       dish_name: item.dish_name,
       image_url: item.image_url,
@@ -416,14 +426,14 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       .select();
     if (itemsError) throw itemsError;
 
-    updateAverages(primaryDish.id, restaurant_id).catch(console.error);
+    dishes.forEach(dish => updateAverages(dish.id, restaurant_id).catch(console.error));
 
     res.status(201).json({
       group,
-      rating: primaryRating,
+      rating: createdRatings?.[0] ?? null,
       items: createdItems ?? [],
       group_id: groupId,
-      primary_rating_id: ratingId,
+      primary_rating_id: primaryRatingId,
     });
   } catch (err) { next(err); }
 });
