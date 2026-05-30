@@ -22,17 +22,58 @@ function geminiKey() {
   return key;
 }
 
+function extractFirstJsonObject(text) {
+  const source = String(text ?? '');
+  const start = source.indexOf('{');
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = inString;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+
+  return null;
+}
+
 function parseGeminiJson(rawText, fallback) {
   const cleaned = String(rawText ?? '{}')
     .replace(/```json\n?/g, '')
     .replace(/```\n?/g, '')
     .trim();
+  const jsonObject = extractFirstJsonObject(cleaned) ?? cleaned;
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(jsonObject);
   } catch (error) {
     console.warn('[AI_DETECT_PARSE_ERROR]', {
       message: error.message,
       rawTextPreview: cleaned.slice(0, 500),
+      extractedJsonPreview: jsonObject.slice(0, 500),
     });
     return fallback;
   }

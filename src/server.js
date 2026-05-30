@@ -11,6 +11,10 @@ import router from './routes/index.js';
 
 const app = express();
 
+// The production app is served behind a reverse proxy that sets X-Forwarded-*.
+// Trust one proxy hop so express-rate-limit keys clients by the real IP.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
+
 // ── Security headers ────────────────────────────────────────────────────────
 app.use(helmet());
 
