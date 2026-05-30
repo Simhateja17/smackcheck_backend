@@ -61,7 +61,50 @@ function extractFirstJsonObject(text) {
   return null;
 }
 
-function parseGeminiJson(rawText, fallback) {
+function parseJsonStringLiteral(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value ?? '').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+}
+
+function recoverFlatJsonFields(text) {
+  const source = String(text ?? '');
+  const recovered = {};
+
+  for (const match of source.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)"/g)) {
+    recovered[match[1]] = parseJsonStringLiteral(match[2]);
+  }
+
+  for (const match of source.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*(true|false|null|-?\d+(?:\.\d+)?)/g)) {
+    const [, key, rawValue] = match;
+    if (rawValue === 'true') recovered[key] = true;
+    else if (rawValue === 'false') recovered[key] = false;
+    else if (rawValue === 'null') recovered[key] = null;
+    else recovered[key] = Number(rawValue);
+  }
+
+  const alternativesMatch = source.match(/"alternatives"\s*:\s*(\[[^\]]*\])/);
+  if (alternativesMatch) {
+    try {
+      const alternatives = JSON.parse(alternativesMatch[1]);
+      if (Array.isArray(alternatives)) recovered.alternatives = alternatives;
+    } catch {
+      // Keep any other recovered fields; alternatives are optional.
+    }
+  }
+
+  const hasDishName = typeof recovered.dishName === 'string' && recovered.dishName.trim();
+  if (hasDishName && recovered.isFood !== false) {
+    recovered.isFood = true;
+    recovered.itemType = recovered.itemType || 'food';
+  }
+
+  return Object.keys(recovered).length > 0 ? recovered : null;
+}
+
+export function parseGeminiJson(rawText, fallback) {
   const cleaned = String(rawText ?? '{}')
     .replace(/```json\n?/g, '')
     .replace(/```\n?/g, '')
@@ -70,12 +113,15 @@ function parseGeminiJson(rawText, fallback) {
   try {
     return JSON.parse(jsonObject);
   } catch (error) {
+    const recovered = recoverFlatJsonFields(jsonObject);
     console.warn('[AI_DETECT_PARSE_ERROR]', {
       message: error.message,
       rawTextPreview: cleaned.slice(0, 500),
       extractedJsonPreview: jsonObject.slice(0, 500),
+      recovered: Boolean(recovered),
+      recoveredKeys: recovered ? Object.keys(recovered) : [],
     });
-    return fallback;
+    return recovered ?? fallback;
   }
 }
 
@@ -192,7 +238,7 @@ function receiptMatchScore(dishName, receiptLine) {
   return overlap * 25;
 }
 
-function normalizeDishDetection(value) {
+export function normalizeDishDetection(value) {
   const isFood = value?.isFood !== false;
   const dishName = String(value?.dishName ?? value?.dish_name ?? '').trim();
   const cuisine = String(value?.cuisine ?? value?.cuisineType ?? value?.cuisine_type ?? '').trim();
@@ -327,11 +373,12 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
 
     // Strip markdown code fences if Gemini wraps the response
     const result = normalizeDishDetection(parseGeminiJson(rawText, {
-      isFood: false,
+      isFood: true,
       dishName: null,
       cuisine: null,
       confidence: 0,
       description: null,
+      itemType: 'food',
     }));
 
     console.info('[AI_DETECT_RESULT]', {
