@@ -210,6 +210,29 @@ router.get('/:id', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/ratings/:id/group-items — dishes posted together with this rating.
+router.get('/:id/group-items', requireAuth, async (req, res, next) => {
+  try {
+    const { data: rating, error: ratingError } = await supabaseAdmin
+      .from('ratings')
+      .select('id, group_id')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (ratingError) throw ratingError;
+    if (!rating) return res.status(404).json({ error: 'Rating not found' });
+    if (!rating.group_id) return res.json([]);
+
+    const { data, error } = await supabaseAdmin
+      .from('review_group_items')
+      .select('id, group_id, rating_id, dish_id, dish_name, image_url, price, sort_order, ai_confidence, currency_code')
+      .eq('group_id', rating.group_id)
+      .order('sort_order', { ascending: true });
+    if (error) throw error;
+
+    res.json(data ?? []);
+  } catch (err) { next(err); }
+});
+
 // POST /api/ratings/receipt — attach a receipt image for internal validation
 router.post('/receipt', requireAuth, async (req, res, next) => {
   try {
