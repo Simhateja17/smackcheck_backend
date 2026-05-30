@@ -88,10 +88,10 @@ function isOwnReceiptStorageUrl(url, userId) {
   }
 }
 
-// GET /api/ratings?dishId=...&restaurantId=...
+// GET /api/ratings?dishId=...&dishIds=id1,id2&restaurantId=...
 router.get('/', requireAuth, async (req, res, next) => {
   try {
-    const { dishId, restaurantId, userId, limit = '20', offset = '0' } = req.query;
+    const { dishId, dishIds, restaurantId, userId, limit = '20', offset = '0' } = req.query;
     let q = supabaseAdmin
       .from('ratings')
       .select('*, profiles(id, name, username, profile_photo_url), dishes(id, name), restaurants(id, name)')
@@ -99,6 +99,7 @@ router.get('/', requireAuth, async (req, res, next) => {
       .range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
     if (dishId) q = q.eq('dish_id', dishId);
+    if (dishIds) q = q.in('dish_id', String(dishIds).split(',').filter(Boolean));
     if (restaurantId) q = q.eq('restaurant_id', restaurantId);
     if (userId) q = q.eq('user_id', userId);
 
