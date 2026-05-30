@@ -137,6 +137,8 @@ function summarizeGeminiResponse(geminiResp) {
 }
 
 function normalizeReceiptAnalysis(value) {
+  const currencyCode = String(value?.currencyCode ?? value?.currency_code ?? '').trim().toUpperCase() || null;
+  const currencySymbol = String(value?.currencySymbol ?? value?.currency_symbol ?? '').trim() || null;
   const sourceSuggestions = value?.suggestions ?? value?.matches;
   const suggestions = Array.isArray(sourceSuggestions)
     ? sourceSuggestions
@@ -162,6 +164,8 @@ function normalizeReceiptAnalysis(value) {
     summary: typeof value?.summary === 'string' ? value.summary.slice(0, 500) : null,
     rawItems,
     receiptItems: rawItems,
+    currencyCode,
+    currencySymbol,
     suggestions,
     matches: suggestions,
   };
@@ -433,7 +437,8 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
       'You are reading a restaurant, cafe, theater, or food delivery receipt image.',
       'First OCR every visible purchased food or drink line item with its price, then match line-item prices to the uploaded dish names.',
       'Return compact JSON only with this shape:',
-      '{"summary":string|null,"rawItems":string[],"suggestions":[{"dishName":string,"price":number,"confidence":number}]}',
+      '{"summary":string|null,"currencyCode":string|null,"currencySymbol":string|null,"rawItems":string[],"suggestions":[{"dishName":string,"price":number,"confidence":number}]}',
+      'Set currencyCode and currencySymbol only if the receipt visibly mentions a currency symbol or code. Otherwise use null.',
       'Use the exact dishName from this list when possible:',
       JSON.stringify(names),
       'rawItems must include visible purchasable line items such as "AVOCADO BURGER 14.99", "SM POPCORN 8.50", or "PESTO PASTA 12.00".',
@@ -456,9 +461,6 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
       generationConfig: {
         maxOutputTokens: 512,
         responseMimeType: 'application/json',
-        thinkingConfig: {
-          thinkingLevel: 'minimal',
-        },
       },
     };
 

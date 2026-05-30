@@ -24,6 +24,11 @@ function parseOptionalNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function cleanCurrencyCode(value) {
+  const code = String(value ?? '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : null;
+}
+
 function cleanTags(tags) {
   return Array.isArray(tags)
     ? tags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 20)
@@ -258,7 +263,7 @@ router.post('/receipt', requireAuth, async (req, res, next) => {
 // POST /api/ratings — submit a rating
 router.post('/', requireAuth, async (req, res, next) => {
   try {
-    const { dish_id, restaurant_id, rating, comment, image_url, latitude, longitude, price } = req.body;
+    const { dish_id, restaurant_id, rating, comment, image_url, latitude, longitude, price, currency_code } = req.body;
     if (!dish_id || !restaurant_id || rating == null) {
       return res.status(400).json({ error: 'dish_id, restaurant_id, and rating are required' });
     }
@@ -280,6 +285,7 @@ router.post('/', requireAuth, async (req, res, next) => {
         latitude: latitude ?? null,
         longitude: longitude ?? null,
         price: price ?? null,
+        currency_code: cleanCurrencyCode(currency_code),
         created_at: new Date().toISOString(),
       })
       .select()
@@ -333,6 +339,7 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
         dish_name: String(item?.dish_name ?? item?.dishName ?? '').trim(),
         image_url: item?.image_url ?? item?.imageUrl ?? null,
         price: parseOptionalNumber(item?.price),
+        currency_code: cleanCurrencyCode(item?.currency_code ?? item?.currencyCode),
         ai_confidence: parseOptionalNumber(item?.ai_confidence ?? item?.aiConfidence),
         sort_order: Number.isInteger(item?.sort_order) ? item.sort_order : index,
         rating: dishRating,
@@ -391,6 +398,7 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       latitude: parseOptionalNumber(latitude),
       longitude: parseOptionalNumber(longitude),
       price: item.price,
+      currency_code: item.currency_code,
       group_id: groupId,
       created_at: createdAt,
     }));
@@ -415,6 +423,7 @@ router.post('/grouped', requireAuth, async (req, res, next) => {
       dish_name: item.dish_name,
       image_url: item.image_url,
       price: item.price,
+      currency_code: item.currency_code,
       sort_order: item.sort_order,
       ai_confidence: item.ai_confidence,
       created_at: createdAt,
