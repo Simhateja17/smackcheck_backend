@@ -214,10 +214,11 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     const prompt = [
       'Identify the food or beverage in this image.',
       'Return compact JSON only with this shape:',
-      '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"description":string,"ingredients":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string}',
+      '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string}',
       'Use the most specific common dish name. For example, say "pesto pasta" instead of just "pasta" when visible.',
       'If multiple dishes are visible, name the most prominent foreground dish.',
       'Do not return Unknown if a recognizable food or drink is visible.',
+      'Do not include description, ingredients, markdown, or prose.',
     ].join('\n');
 
     const body = {
@@ -231,7 +232,7 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
         ],
       }],
       generationConfig: {
-        maxOutputTokens: 96,
+        maxOutputTokens: 256,
         responseMimeType: 'application/json',
       },
     };
