@@ -233,9 +233,6 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       generationConfig: {
         maxOutputTokens: 96,
         responseMimeType: 'application/json',
-        thinkingConfig: {
-          thinkingLevel: 'minimal',
-        },
       },
     };
 
