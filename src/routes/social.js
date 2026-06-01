@@ -45,6 +45,7 @@ function normalizeRatingRow(row, commentCounts = new Map()) {
     comment: row.comment ?? '',
     image_urls: imageUrls.length ? imageUrls : (dishImageUrl ? [dishImageUrl] : []),
     price: row.price ?? null,
+    currency_code: row.currency_code ?? null,
     created_at: row.created_at ?? null,
   };
 }
