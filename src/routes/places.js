@@ -11,6 +11,19 @@ import { pipeline } from 'node:stream/promises';
 const router = Router();
 const PLACES_API_BASE = 'https://maps.googleapis.com/maps/api';
 
+const LODGING_TYPE_BLACKLIST = new Set([
+  'lodging', 'hotel', 'motel', 'resort_hotel',
+]);
+
+const HOTEL_NAME_KEYWORDS = /\b(hotel|motel|inn|resort|hostel|suites)\b/i;
+
+function isStandaloneRestaurant(place) {
+  const types = place.types ?? [];
+  if (types.some(t => LODGING_TYPE_BLACKLIST.has(t))) return false;
+  if (HOTEL_NAME_KEYWORDS.test(place.name ?? '')) return false;
+  return true;
+}
+
 function apiKey() {
   const key = process.env.GOOGLE_PLACES_API_KEY;
   if (!key) throw Object.assign(new Error('GOOGLE_PLACES_API_KEY not configured'), { status: 503 });
@@ -33,7 +46,7 @@ router.get('/nearby', requireAuth, async (req, res, next) => {
     const resp = await fetch(url.toString());
     const json = await resp.json();
 
-    let results = json.results ?? [];
+    let results = (json.results ?? []).filter(isStandaloneRestaurant);
     if (minRating) results = results.filter(r => (r.rating ?? 0) >= parseFloat(minRating));
 
     res.json(mapPlacesResults(results));
@@ -74,7 +87,7 @@ router.get('/search', requireAuth, async (req, res, next) => {
 
     const resp = await fetch(url.toString());
     const json = await resp.json();
-    res.json(mapPlacesResults(json.results ?? []));
+    res.json(mapPlacesResults((json.results ?? []).filter(isStandaloneRestaurant)));
   } catch (err) { next(err); }
 });
 

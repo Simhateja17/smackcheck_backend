@@ -10,7 +10,7 @@ const router = Router();
 
 const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1beta';
 const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 const GEMINI_RECEIPT_MEDIA_RESOLUTION = process.env.GEMINI_RECEIPT_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 
@@ -266,6 +266,9 @@ export function normalizeDishDetection(value) {
     itemType: ['food', 'beverage'].includes(itemType) ? itemType : (isFood ? 'food' : 'unknown'),
     restaurantChain: String(value?.restaurantChain ?? value?.restaurant_chain ?? '').trim(),
     restaurantType: String(value?.restaurantType ?? value?.restaurant_type ?? '').trim(),
+    brand: String(value?.brand ?? value?.restaurantChain ?? value?.restaurant_chain ?? '').trim(),
+    genericName: String(value?.genericName ?? value?.generic_name ?? '').trim(),
+    evidence: String(value?.evidence ?? '').trim().slice(0, 160),
     error: null,
   };
 }
@@ -303,13 +306,20 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     });
 
     const prompt = [
-      'Identify the food or beverage in this image.',
+      'Identify the rateable restaurant, cafe, or food-service food or beverage item in this image.',
       'Return compact JSON only with this shape:',
-      '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"itemType":"food|beverage|unknown"}',
-      'Use the most specific common dish name. For example, say "pesto pasta" instead of just "pasta" when visible.',
-      'If multiple dishes are visible, name the most prominent foreground dish.',
-      'Do not return Unknown if a recognizable food or drink is visible.',
-      'Do not include restaurantChain or restaurantType.',
+      '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string,"brand":string,"genericName":string,"evidence":string}',
+      'This is for a food rating app: a valid item does not need to be plated.',
+      'Packaged, boxed, wrapped, cup, bowl, carton, tray, delivery, or takeout food and drinks are valid when visible or strongly indicated.',
+      'Set isFood:false and itemType:"unknown" only when the image clearly has no rateable food or beverage item, such as a person, receipt only, menu only, empty table, empty container, scenery, or unrelated object.',
+      'For ambiguous restaurant/cafe packaging, cups, cartons, bowls, wrappers, trays, or takeout containers, prefer isFood:true with a broad useful dishName and lower confidence instead of Unknown.',
+      'Use the most specific common item name visible. For example, say "pesto pasta" instead of "pasta", "french fries" instead of "food", and "coffee" instead of "drink" when supported.',
+      'Use visible brand or packaging cues when they materially help identify the item. Examples: a McDonald\'s/McCafe coffee cup can be "McDonald\'s coffee"; a McDonald\'s fry carton can be "McDonald\'s fries" or "french fries".',
+      'Do not invent a highly specific variant, flavor, or menu item unless visible or strongly implied. Use broad names like "McDonald\'s drink", "takeout item", "coffee", "fries", "burger", or "popcorn" when exact contents are uncertain.',
+      'If multiple items are visible, name the most prominent foreground rateable item.',
+      'Never return Unknown if a recognizable or strongly indicated food or drink is visible.',
+      'Set itemType:"beverage" for drinks including coffee, tea, juice, soda, shakes, smoothies, beer, wine, cocktails, or water.',
+      'Set restaurantChain/brand only when visible or strongly indicated by packaging. Set genericName to the non-branded item category when possible.',
       'Do not include description, ingredients, markdown, or prose.',
     ].join('\n');
 
@@ -403,6 +413,9 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       alternatives: result.alternatives,
       restaurantChain: result.restaurantChain,
       restaurantType: result.restaurantType,
+      brand: result.brand,
+      genericName: result.genericName,
+      evidence: result.evidence,
     });
 
     res.json(result);
