@@ -334,8 +334,44 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
         ],
       }],
       generationConfig: {
-        maxOutputTokens: 128,
+        maxOutputTokens: 256,
         responseMimeType: 'application/json',
+        responseJsonSchema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            isFood: { type: 'boolean' },
+            dishName: { type: 'string' },
+            cuisine: { type: ['string', 'null'] },
+            confidence: { type: 'number' },
+            alternatives: {
+              type: 'array',
+              items: { type: 'string' },
+            },
+            itemType: {
+              type: 'string',
+              enum: ['food', 'beverage', 'unknown'],
+            },
+            restaurantChain: { type: 'string' },
+            restaurantType: { type: 'string' },
+            brand: { type: 'string' },
+            genericName: { type: 'string' },
+            evidence: { type: 'string' },
+          },
+          required: [
+            'isFood',
+            'dishName',
+            'cuisine',
+            'confidence',
+            'alternatives',
+            'itemType',
+            'restaurantChain',
+            'restaurantType',
+            'brand',
+            'genericName',
+            'evidence',
+          ],
+        },
       },
     };
 
