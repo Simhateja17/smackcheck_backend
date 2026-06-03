@@ -14,6 +14,8 @@ const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERS
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
 const GEMINI_RECEIPT_MEDIA_RESOLUTION = process.env.GEMINI_RECEIPT_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
+const GEMINI_DETECT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.GEMINI_DETECT_MAX_OUTPUT_TOKENS ?? '8192', 10);
+const GEMINI_RECEIPT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.GEMINI_RECEIPT_MAX_OUTPUT_TOKENS ?? '8192', 10);
 
 function geminiKey() {
   const key = process.env.GEMINI_API_KEY;
@@ -234,7 +236,10 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
         ],
       }],
       generationConfig: {
-        maxOutputTokens: 256,
+        temperature: 0.1,
+        topK: 16,
+        topP: 0.8,
+        maxOutputTokens: Number.isFinite(GEMINI_DETECT_MAX_OUTPUT_TOKENS) ? GEMINI_DETECT_MAX_OUTPUT_TOKENS : 8192,
         responseMimeType: 'application/json',
         responseJsonSchema: {
           type: 'object',
@@ -408,7 +413,10 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
         ],
       }],
       generationConfig: {
-        maxOutputTokens: 512,
+        temperature: 0.1,
+        topK: 16,
+        topP: 0.8,
+        maxOutputTokens: Number.isFinite(GEMINI_RECEIPT_MAX_OUTPUT_TOKENS) ? GEMINI_RECEIPT_MAX_OUTPUT_TOKENS : 8192,
         responseMimeType: 'application/json',
       },
     };
