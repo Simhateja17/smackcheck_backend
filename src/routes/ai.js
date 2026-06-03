@@ -5,6 +5,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { uploadLimiter } from '../middleware/rateLimiter.js';
+import { extractGeminiText, parseGeminiJson } from '../lib/gemini.js';
 
 const router = Router();
 
@@ -22,113 +23,11 @@ function geminiKey() {
   return key;
 }
 
-function extractFirstJsonObject(text) {
-  const source = String(text ?? '');
-  const start = source.indexOf('{');
-  if (start === -1) return null;
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = start; index < source.length; index += 1) {
-    const char = source[index];
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (char === '\\') {
-      escaped = inString;
-      continue;
-    }
-
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-
-    if (inString) continue;
-
-    if (char === '{') depth += 1;
-    if (char === '}') {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-
-  return null;
-}
-
-function parseJsonStringLiteral(value) {
-  try {
-    return JSON.parse(`"${value}"`);
-  } catch {
-    return String(value ?? '').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-  }
-}
-
-function recoverFlatJsonFields(text) {
-  const source = String(text ?? '');
-  const recovered = {};
-
-  for (const match of source.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)"/g)) {
-    recovered[match[1]] = parseJsonStringLiteral(match[2]);
-  }
-
-  for (const match of source.matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*(true|false|null|-?\d+(?:\.\d+)?)/g)) {
-    const [, key, rawValue] = match;
-    if (rawValue === 'true') recovered[key] = true;
-    else if (rawValue === 'false') recovered[key] = false;
-    else if (rawValue === 'null') recovered[key] = null;
-    else recovered[key] = Number(rawValue);
-  }
-
-  const alternativesMatch = source.match(/"alternatives"\s*:\s*(\[[^\]]*\])/);
-  if (alternativesMatch) {
-    try {
-      const alternatives = JSON.parse(alternativesMatch[1]);
-      if (Array.isArray(alternatives)) recovered.alternatives = alternatives;
-    } catch {
-      // Keep any other recovered fields; alternatives are optional.
-    }
-  }
-
-  const hasDishName = typeof recovered.dishName === 'string' && recovered.dishName.trim();
-  if (hasDishName && recovered.isFood !== false) {
-    recovered.isFood = true;
-    recovered.itemType = recovered.itemType || 'food';
-  }
-
-  return Object.keys(recovered).length > 0 ? recovered : null;
-}
-
-export function parseGeminiJson(rawText, fallback) {
-  const cleaned = String(rawText ?? '{}')
-    .replace(/```json\n?/g, '')
-    .replace(/```\n?/g, '')
-    .trim();
-  const jsonObject = extractFirstJsonObject(cleaned) ?? cleaned;
-  try {
-    return JSON.parse(jsonObject);
-  } catch (error) {
-    const recovered = recoverFlatJsonFields(jsonObject);
-    console.warn('[AI_DETECT_PARSE_ERROR]', {
-      message: error.message,
-      rawTextPreview: cleaned.slice(0, 500),
-      extractedJsonPreview: jsonObject.slice(0, 500),
-      recovered: Boolean(recovered),
-      recoveredKeys: recovered ? Object.keys(recovered) : [],
-    });
-    return recovered ?? fallback;
-  }
-}
-
 function summarizeGeminiResponse(geminiResp) {
   const candidate = geminiResp?.candidates?.[0];
   return {
     candidateCount: Array.isArray(geminiResp?.candidates) ? geminiResp.candidates.length : 0,
+    partCount: Array.isArray(candidate?.content?.parts) ? candidate.content.parts.length : 0,
     finishReason: candidate?.finishReason,
     safetyRatings: candidate?.safetyRatings,
     promptFeedback: geminiResp?.promptFeedback,
@@ -307,8 +206,9 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
 
     const prompt = [
       'Identify the rateable restaurant, cafe, or food-service food or beverage item in this image.',
-      'Return compact JSON only with this shape:',
+      'Return compact JSON only with this shape and no extra text before or after it:',
       '{"isFood":boolean,"dishName":string,"cuisine":string,"confidence":number,"alternatives":string[],"itemType":"food|beverage|unknown","restaurantChain":string,"restaurantType":string,"brand":string,"genericName":string,"evidence":string}',
+      'Your first character must be "{" and your last character must be "}".',
       'This is for a food rating app: a valid item does not need to be plated.',
       'Packaged, boxed, wrapped, cup, bowl, carton, tray, delivery, or takeout food and drinks are valid when visible or strongly indicated.',
       'Set isFood:false and itemType:"unknown" only when the image clearly has no rateable food or beverage item, such as a person, receipt only, menu only, empty table, empty container, scenery, or unrelated object.',
@@ -320,7 +220,7 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       'Never return Unknown if a recognizable or strongly indicated food or drink is visible.',
       'Set itemType:"beverage" for drinks including coffee, tea, juice, soda, shakes, smoothies, beer, wine, cocktails, or water.',
       'Set restaurantChain/brand only when visible or strongly indicated by packaging. Set genericName to the non-branded item category when possible.',
-      'Do not include description, ingredients, markdown, or prose.',
+      'Do not include description, ingredients, markdown, commentary, or prose.',
     ].join('\n');
 
     const body = {
@@ -413,7 +313,7 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     }
 
     const geminiResp = await resp.json();
-    const rawText = geminiResp.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    const rawText = extractGeminiText(geminiResp);
 
     console.info('[AI_DETECT_GEMINI_RESPONSE]', {
       requestId: req.requestId,
@@ -532,7 +432,7 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
     }
 
     const geminiResp = await resp.json();
-    const rawText = geminiResp.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}';
+    const rawText = extractGeminiText(geminiResp);
     const parsedReceipt = normalizeReceiptAnalysis(parseGeminiJson(rawText, {}));
     const inferredSuggestions = parsedReceipt.suggestions.length === 0
       ? inferReceiptSuggestionsFromRawItems(parsedReceipt.rawItems, names)
