@@ -88,7 +88,6 @@ router.get('/search', requireAuth, async (req, res, next) => {
       .from('profiles')
       .select('id, name, username, profile_photo_url')
       .ilike('username', `${normalized}%`)
-      .neq('id', req.userId)
       .order('username', { ascending: true })
       .limit(parseInt(limit));
     if (error) throw error;
