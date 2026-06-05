@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../config/supabase.js';
+import { isAdminUser } from '../utils/notifications.js';
 
 const shouldLogAuth = process.env.NODE_ENV !== 'test';
 
@@ -54,3 +55,22 @@ export const requireAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'Authentication failed' });
   }
 };
+
+/**
+ * Verifies the request is from a signed-in admin.
+ * This is the trust boundary for every /api/admin route.
+ */
+export const requireAdmin = [
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const isAdmin = await isAdminUser(supabaseAdmin, req.userId);
+      if (!isAdmin) {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+      next();
+    } catch (error) {
+      next(error);
+    }
+  },
+];

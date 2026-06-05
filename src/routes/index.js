@@ -19,6 +19,7 @@ import placesRoutes from './places.js';
 import storageRoutes from './storage.js';
 import moderationRoutes from './moderation.js';
 import aiRoutes from './ai.js';
+import adminRoutes from './admin.js';
 
 const router = Router();
 
@@ -41,5 +42,6 @@ router.use('/places', placesRoutes);
 router.use('/storage', storageRoutes);
 router.use('/moderation', moderationRoutes);
 router.use('/ai', aiRoutes);
+router.use('/admin', adminRoutes);
 
 export default router;
