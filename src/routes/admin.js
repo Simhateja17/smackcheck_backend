@@ -66,6 +66,31 @@ function badRequest(message) {
   return Object.assign(new Error(message), { status: 400 });
 }
 
+async function attachFirstReviewer(rows, foreignKey) {
+  if (!rows.length) return rows;
+
+  const ids = rows.map(row => row.id);
+  const { data, error } = await supabaseAdmin
+    .from('ratings')
+    .select(`${foreignKey}, user_id, created_at, profiles(id, name, username, email, profile_photo_url)`)
+    .in(foreignKey, ids)
+    .order('created_at', { ascending: true });
+  if (error) throw error;
+
+  const firstReviewerById = new Map();
+  for (const rating of data ?? []) {
+    const catalogId = rating[foreignKey];
+    if (catalogId && !firstReviewerById.has(catalogId)) {
+      firstReviewerById.set(catalogId, rating.profiles ?? null);
+    }
+  }
+
+  return rows.map(row => ({
+    ...row,
+    first_reviewer: firstReviewerById.get(row.id) ?? null,
+  }));
+}
+
 async function logModerationAction({ moderatorId, targetType, targetId, action, reason }) {
   const { data, error } = await supabaseAdmin
     .from('moderation_actions')
@@ -571,7 +596,8 @@ router.get('/restaurants', async (req, res, next) => {
 
     const { data, count, error } = await query;
     if (error) throw error;
-    res.json({ restaurants: data ?? [], count: count ?? 0, limit, offset });
+    const restaurants = await attachFirstReviewer(data ?? [], 'restaurant_id');
+    res.json({ restaurants, count: count ?? 0, limit, offset });
   } catch (err) { next(err); }
 });
 
@@ -614,7 +640,8 @@ router.get('/dishes', async (req, res, next) => {
 
     const { data, count, error } = await query;
     if (error) throw error;
-    res.json({ dishes: data ?? [], count: count ?? 0, limit, offset });
+    const dishes = await attachFirstReviewer(data ?? [], 'dish_id');
+    res.json({ dishes, count: count ?? 0, limit, offset });
   } catch (err) { next(err); }
 });
 
