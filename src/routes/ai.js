@@ -1,41 +1,17 @@
 /**
- * /api/ai — AI dish detection via Gemini
+ * /api/ai — AI dish detection via Azure OpenAI
  * Replaces the analyze-dish Supabase Edge Function.
  */
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { uploadLimiter } from '../middleware/rateLimiter.js';
-import { extractGeminiText, parseGeminiJson } from '../lib/gemini.js';
+import { parseGeminiJson as parseModelJson } from '../lib/gemini.js';
+import { azureVisionJson, AZURE_OPENAI_DEPLOYMENT } from '../lib/azureOpenAI.js';
 
 const router = Router();
 
-const GEMINI_API_VERSION = process.env.GEMINI_API_VERSION || 'v1beta';
-const GEMINI_BASE = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}`;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
-const GEMINI_MEDIA_RESOLUTION = process.env.GEMINI_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
-const GEMINI_RECEIPT_MEDIA_RESOLUTION = process.env.GEMINI_RECEIPT_MEDIA_RESOLUTION || 'MEDIA_RESOLUTION_HIGH';
-const GEMINI_DETECT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.GEMINI_DETECT_MAX_OUTPUT_TOKENS ?? '8192', 10);
-const GEMINI_RECEIPT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.GEMINI_RECEIPT_MAX_OUTPUT_TOKENS ?? '8192', 10);
-
-function geminiKey() {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key || key === 'your_gemini_api_key_here') {
-    throw Object.assign(new Error('GEMINI_API_KEY not configured'), { status: 503 });
-  }
-  return key;
-}
-
-function summarizeGeminiResponse(geminiResp) {
-  const candidate = geminiResp?.candidates?.[0];
-  return {
-    candidateCount: Array.isArray(geminiResp?.candidates) ? geminiResp.candidates.length : 0,
-    partCount: Array.isArray(candidate?.content?.parts) ? candidate.content.parts.length : 0,
-    finishReason: candidate?.finishReason,
-    safetyRatings: candidate?.safetyRatings,
-    promptFeedback: geminiResp?.promptFeedback,
-    usage: geminiResp?.usageMetadata,
-  };
-}
+const AI_DETECT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.AI_DETECT_MAX_OUTPUT_TOKENS ?? '1024', 10);
+const AI_RECEIPT_MAX_OUTPUT_TOKENS = Number.parseInt(process.env.AI_RECEIPT_MAX_OUTPUT_TOKENS ?? '4096', 10);
 
 function normalizeReceiptAnalysis(value) {
   const currencyCode = String(value?.currencyCode ?? value?.currency_code ?? '').trim().toUpperCase() || null;
@@ -197,9 +173,7 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     console.info('[AI_DETECT_START]', {
       requestId: req.requestId,
       userId: req.userId,
-      model: GEMINI_MODEL,
-      apiVersion: GEMINI_API_VERSION,
-      mediaResolution: GEMINI_MEDIA_RESOLUTION,
+      model: AZURE_OPENAI_DEPLOYMENT,
       mimeType,
       base64Chars: String(imageBase64).length,
       estimatedImageBytes: imageBytes,
@@ -225,110 +199,68 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
       'Do not include description, ingredients, markdown, commentary, or prose.',
     ].join('\n');
 
-    const body = {
-      contents: [{
-        parts: [
-          { text: prompt },
-          {
-            inline_data: { mime_type: mimeType, data: imageBase64 },
-            media_resolution: { level: GEMINI_MEDIA_RESOLUTION },
-          },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.1,
-        topK: 16,
-        topP: 0.8,
-        maxOutputTokens: Number.isFinite(GEMINI_DETECT_MAX_OUTPUT_TOKENS) ? GEMINI_DETECT_MAX_OUTPUT_TOKENS : 8192,
-        responseMimeType: 'application/json',
-        responseJsonSchema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            isFood: { type: 'boolean' },
-            dishName: { type: 'string' },
-            cuisine: { type: ['string', 'null'] },
-            confidence: { type: 'number' },
-            alternatives: {
-              type: 'array',
-              items: { type: 'string' },
+    const azure = await azureVisionJson({
+      prompt,
+      imageBase64,
+      mimeType,
+      maxTokens: Number.isFinite(AI_DETECT_MAX_OUTPUT_TOKENS) ? AI_DETECT_MAX_OUTPUT_TOKENS : 1024,
+      responseFormat: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'dish_detection',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              isFood: { type: 'boolean' },
+              dishName: { type: 'string' },
+              cuisine: { type: ['string', 'null'] },
+              confidence: { type: 'number' },
+              alternatives: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+              itemType: {
+                type: 'string',
+                enum: ['food', 'beverage', 'unknown'],
+              },
+              restaurantChain: { type: 'string' },
+              restaurantType: { type: 'string' },
+              brand: { type: 'string' },
+              genericName: { type: 'string' },
+              evidence: { type: 'string' },
             },
-            itemType: {
-              type: 'string',
-              enum: ['food', 'beverage', 'unknown'],
-            },
-            restaurantChain: { type: 'string' },
-            restaurantType: { type: 'string' },
-            brand: { type: 'string' },
-            genericName: { type: 'string' },
-            evidence: { type: 'string' },
+            required: [
+              'isFood',
+              'dishName',
+              'cuisine',
+              'confidence',
+              'alternatives',
+              'itemType',
+              'restaurantChain',
+              'restaurantType',
+              'brand',
+              'genericName',
+              'evidence',
+            ],
           },
-          required: [
-            'isFood',
-            'dishName',
-            'cuisine',
-            'confidence',
-            'alternatives',
-            'itemType',
-            'restaurantChain',
-            'restaurantType',
-            'brand',
-            'genericName',
-            'evidence',
-          ],
         },
       },
-    };
-
-    const geminiStartedAt = Date.now();
-    const resp = await fetch(
-      `${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': geminiKey(),
-        },
-        body: JSON.stringify(body),
-      }
-    );
-    const geminiMs = Date.now() - geminiStartedAt;
-
-    console.info('[AI_DETECT_GEMINI_HTTP]', {
-      requestId: req.requestId,
-      userId: req.userId,
-      status: resp.status,
-      ok: resp.ok,
-      statusText: resp.statusText,
-      geminiMs,
-      model: GEMINI_MODEL,
     });
+    const rawText = azure.rawText;
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      console.error('[AI_DETECT_GEMINI_ERROR]', {
-        requestId: req.requestId,
-        userId: req.userId,
-        status: resp.status,
-        statusText: resp.statusText,
-        geminiMs,
-        errorPreview: err.slice(0, 1000),
-      });
-      throw Object.assign(new Error(`Gemini API error: ${err}`), { status: 502 });
-    }
-
-    const geminiResp = await resp.json();
-    const rawText = extractGeminiText(geminiResp);
-
-    console.info('[AI_DETECT_GEMINI_RESPONSE]', {
+    console.info('[AI_DETECT_AZURE_RESPONSE]', {
       requestId: req.requestId,
       userId: req.userId,
-      ...summarizeGeminiResponse(geminiResp),
+      status: azure.status,
+      azureMs: azure.ms,
+      finishReason: azure.finishReason,
+      usage: azure.usage,
       rawTextPreview: rawText.slice(0, 500),
     });
 
-    // Strip markdown code fences if Gemini wraps the response
-    const result = normalizeDishDetection(parseGeminiJson(rawText, {
+    const result = normalizeDishDetection(parseModelJson(rawText, {
       isFood: true,
       dishName: null,
       cuisine: null,
@@ -340,11 +272,9 @@ router.post('/detect-dish', requireAuth, uploadLimiter, async (req, res, next) =
     console.info('[AI_DETECT_RESULT]', {
       requestId: req.requestId,
       userId: req.userId,
-      model: GEMINI_MODEL,
-      apiVersion: GEMINI_API_VERSION,
-      mediaResolution: GEMINI_MEDIA_RESOLUTION,
+      model: AZURE_OPENAI_DEPLOYMENT,
       imageBytes,
-      geminiMs,
+      azureMs: azure.ms,
       totalMs: Date.now() - startedAt,
       dishName: result.dishName,
       cuisine: result.cuisine,
@@ -402,46 +332,14 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
       'Only include numeric item prices. Do not invent prices if no item price is visible.',
     ].join('\n');
 
-    const body = {
-      contents: [{
-        parts: [
-          { text: prompt },
-          {
-            inline_data: { mime_type: mimeType, data: imageBase64 },
-            media_resolution: { level: GEMINI_RECEIPT_MEDIA_RESOLUTION },
-          },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.1,
-        topK: 16,
-        topP: 0.8,
-        maxOutputTokens: Number.isFinite(GEMINI_RECEIPT_MAX_OUTPUT_TOKENS) ? GEMINI_RECEIPT_MAX_OUTPUT_TOKENS : 8192,
-        responseMimeType: 'application/json',
-      },
-    };
-
-    const geminiStartedAt = Date.now();
-    const resp = await fetch(
-      `${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': geminiKey(),
-        },
-        body: JSON.stringify(body),
-      }
-    );
-
-    if (!resp.ok) {
-      const err = await resp.text();
-      throw Object.assign(new Error(`Gemini API error: ${err}`), { status: 502 });
-    }
-
-    const geminiResp = await resp.json();
-    const rawText = extractGeminiText(geminiResp);
-    const parsedReceipt = normalizeReceiptAnalysis(parseGeminiJson(rawText, {}));
+    const azure = await azureVisionJson({
+      prompt,
+      imageBase64,
+      mimeType,
+      maxTokens: Number.isFinite(AI_RECEIPT_MAX_OUTPUT_TOKENS) ? AI_RECEIPT_MAX_OUTPUT_TOKENS : 4096,
+    });
+    const rawText = azure.rawText;
+    const parsedReceipt = normalizeReceiptAnalysis(parseModelJson(rawText, {}));
     const inferredSuggestions = parsedReceipt.suggestions.length === 0
       ? inferReceiptSuggestionsFromRawItems(parsedReceipt.rawItems, names)
       : [];
@@ -454,14 +352,12 @@ router.post('/analyze-receipt', requireAuth, uploadLimiter, async (req, res, nex
       : parsedReceipt;
 
     console.info('[AI_RECEIPT_TIMING]', {
-      model: GEMINI_MODEL,
-      apiVersion: GEMINI_API_VERSION,
-      mediaResolution: GEMINI_RECEIPT_MEDIA_RESOLUTION,
+      model: AZURE_OPENAI_DEPLOYMENT,
       imageBytes,
       dishCount: names.length,
-      geminiMs: Date.now() - geminiStartedAt,
+      azureMs: azure.ms,
       totalMs: Date.now() - startedAt,
-      usage: geminiResp.usageMetadata,
+      usage: azure.usage,
     });
 
     res.json(result);
